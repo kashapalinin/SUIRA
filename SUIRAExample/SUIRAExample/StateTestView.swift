@@ -54,8 +54,7 @@ struct StateTestView: View {
                         }
                     }
                     .padding(.vertical, 8)
-                    .trackRecomposition("CounterBlock")
-                    
+
                     // Текстовое поле
                     VStack(alignment: .leading) {
                         Text("Text Input: \(textInput)")
@@ -110,7 +109,8 @@ struct StateTestView: View {
                 }
             }
             .navigationTitle("State Tracking Test")
-            .trackRecomposition("StateTestView.root")
+            // Один раз на экран: трекер должен быть внутри этого View — иначе при @State обновляется только body экрана, а не обёртка из App.
+            .trackRecomposition("StateTestView")
         }
     }
 }

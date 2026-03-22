@@ -2,7 +2,7 @@ import CoreFoundation
 import SwiftUI
 
 /// Wraps a subtree and records each time SwiftUI evaluates this part of the tree.
-private struct RecompositionTrackedSubtree<Content: View>: View {
+struct RecompositionTrackedSubtree<Content: View>: View {
     let label: String
     let store: RecompositionStore?
     @ViewBuilder var content: () -> Content
@@ -29,6 +29,8 @@ private struct RecompositionTrackedSubtree<Content: View>: View {
 
 public extension View {
     /// Tracks each (re)evaluation of this view’s subtree: increments counters and appends an event.
+    ///
+    /// Use `SuiraTrackedRoot` once in `App` for environment, then add **one** `.trackRecomposition(...)` at the end of each screen’s `body` (SwiftUI often does not re-run outer `App` wrappers when inner `@State` changes).
     ///
     /// Avoid `@ObservedObject` / `@StateObject` on the **same** `RecompositionStore` inside a subtree
     /// wrapped by `trackRecomposition` (or above it): updates from `record` will re-enter `body` and
