@@ -18,12 +18,31 @@ final class SUIRATests: XCTestCase {
         // Put teardown code here. This method is called after the invocation of each test method in the class.
     }
 
-    func testExample() throws {
-        // This is an example of a functional test case.
-        // Use XCTAssert and related functions to verify your tests produce the correct results.
-        // Any test you write for XCTest can be annotated as throws and async.
-        // Mark your test throws to produce an unexpected failure when your test encounters an uncaught error.
-        // Mark your test async to allow awaiting for asynchronous code to complete. Check the results with assertions afterwards.
+    @MainActor
+    func testRecompositionStoreRecordAndReset() throws {
+        let store = RecompositionStore()
+        store.isEnabled = true
+        store.record(viewLabel: "A", bodyDuration: 0.001)
+        store.record(viewLabel: "A", bodyDuration: nil)
+        store.record(viewLabel: "B", bodyDuration: 0.002)
+
+        XCTAssertEqual(store.countsByLabel["A"], 2)
+        XCTAssertEqual(store.countsByLabel["B"], 1)
+        XCTAssertEqual(store.totalCount, 3)
+        XCTAssertEqual(store.events.count, 3)
+
+        store.reset()
+        XCTAssertTrue(store.events.isEmpty)
+        XCTAssertTrue(store.countsByLabel.isEmpty)
+    }
+
+    @MainActor
+    func testRecompositionStoreDisabledSkipsRecords() throws {
+        let store = RecompositionStore()
+        store.isEnabled = false
+        store.record(viewLabel: "X")
+        XCTAssertTrue(store.events.isEmpty)
+        XCTAssertTrue(store.countsByLabel.isEmpty)
     }
 
     func testPerformanceExample() throws {

@@ -6,6 +6,11 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		AA58B9842F657E7B0008F4FA /* SUIRA.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = AA58B9832F657E7B0008F4FA /* SUIRA.framework */; };
+		AA58B9852F657E7B0008F4FA /* SUIRA.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = AA58B9832F657E7B0008F4FA /* SUIRA.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		AA43344D2F5EF45200FDB23B /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -23,10 +28,25 @@
 		};
 /* End PBXContainerItemProxy section */
 
+/* Begin PBXCopyFilesBuildPhase section */
+		AA58B9862F657E7B0008F4FA /* Embed Frameworks */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 10;
+			files = (
+				AA58B9852F657E7B0008F4FA /* SUIRA.framework in Embed Frameworks */,
+			);
+			name = "Embed Frameworks";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
 /* Begin PBXFileReference section */
 		AA43343F2F5EF45000FDB23B /* SUIRAExample.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = SUIRAExample.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AA43344C2F5EF45200FDB23B /* SUIRAExampleTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SUIRAExampleTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		AA4334562F5EF45200FDB23B /* SUIRAExampleUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = SUIRAExampleUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		AA58B9832F657E7B0008F4FA /* SUIRA.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; path = SUIRA.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -52,6 +72,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AA58B9842F657E7B0008F4FA /* SUIRA.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -78,6 +99,7 @@
 				AA4334412F5EF45000FDB23B /* SUIRAExample */,
 				AA43344F2F5EF45200FDB23B /* SUIRAExampleTests */,
 				AA4334592F5EF45200FDB23B /* SUIRAExampleUITests */,
+				AA58B9822F657E7B0008F4FA /* Frameworks */,
 				AA4334402F5EF45000FDB23B /* Products */,
 			);
 			sourceTree = "<group>";
@@ -92,6 +114,14 @@
 			name = Products;
 			sourceTree = "<group>";
 		};
+		AA58B9822F657E7B0008F4FA /* Frameworks */ = {
+			isa = PBXGroup;
+			children = (
+				AA58B9832F657E7B0008F4FA /* SUIRA.framework */,
+			);
+			name = Frameworks;
+			sourceTree = "<group>";
+		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
@@ -102,6 +132,7 @@
 				AA43343B2F5EF45000FDB23B /* Sources */,
 				AA43343C2F5EF45000FDB23B /* Frameworks */,
 				AA43343D2F5EF45000FDB23B /* Resources */,
+				AA58B9862F657E7B0008F4FA /* Embed Frameworks */,
 			);
 			buildRules = (
 			);
