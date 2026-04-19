@@ -2,19 +2,6 @@
 import SwiftUI
 import SUIRA
 
-/// Показывает счётчик без `@ObservedObject` на `RecompositionStore`: иначе каждая
-/// запись из `trackRecomposition` заново обновляет родителя и даёт лавину «рекомпозиций».
-private struct RecompositionStatsStrip: View {
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: 0.5)) { _ in
-            Text("Отслежено рекомпозиций (SUIRA): \(RecompositionStore.shared.totalCount)")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-}
-
 struct StateTestView: View {
     // MARK: - Properties
 
@@ -30,10 +17,6 @@ struct StateTestView: View {
     var body: some View {
         NavigationView {
             List {
-                Section {
-                    RecompositionStatsStrip()
-                }
-
                 // Секция с @State
                 Section(header: Text("@State Test")) {
                     // Счетчик
@@ -109,6 +92,8 @@ struct StateTestView: View {
                 }
             }
             .navigationTitle("State Tracking Test")
+            .suiraDependencyProbe("UserSettings", value: settings)
+            .suiraDependencyProbe("UserProfile", value: profile)
             // Один раз на экран: трекер должен быть внутри этого View — иначе при @State обновляется только body экрана, а не обёртка из App.
             .trackRecomposition("StateTestView")
         }

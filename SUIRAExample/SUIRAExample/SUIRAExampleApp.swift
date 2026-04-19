@@ -14,8 +14,9 @@ struct SUIRAExampleApp: App {
     var body: some Scene {
         WindowGroup {
             SuiraTrackedRoot {
-                StateTestView()
+                ExampleHubView()
             }
+            .suiraInspectorOverlay()
         }
     }
 }

@@ -17,11 +17,24 @@ struct RecompositionTrackedSubtree<Content: View>: View {
         let start = CFAbsoluteTimeGetCurrent()
         let built = content()
         let elapsed = CFAbsoluteTimeGetCurrent() - start
+        let screenSnapshot = SuiraValueSnapshotBuilder.capture(label: label, value: built)
+        let viewNodeSnapshots = SuiraSwiftUIViewTreeBuilder.captureNodeSnapshots(label: label, view: built)
+        let dependencySnapshots = SuiraDependencyRegistry.shared.resolvedRoots().map { item in
+            SuiraValueSnapshotBuilder.capture(label: item.label, value: item.value)
+        }
         // Publishing (@Published) must not run during view updates; defer to next main turn.
         let store = activeStore
         let lbl = label
+        let generation = store.currentGeneration
         DispatchQueue.main.async {
-            store.record(viewLabel: lbl, bodyDuration: elapsed)
+            store.record(
+                viewLabel: lbl,
+                bodyDuration: elapsed,
+                screenSnapshot: screenSnapshot,
+                viewNodeSnapshots: viewNodeSnapshots,
+                dependencySnapshots: dependencySnapshots,
+                generation: generation
+            )
         }
         return built
     }
