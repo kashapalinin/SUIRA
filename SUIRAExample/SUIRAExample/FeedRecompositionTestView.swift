@@ -32,34 +32,28 @@ struct FeedRecompositionTestView: View {
 
     var body: some View {
         List {
-            Section("Фильтры") {
-                TextField("Search", text: $searchText)
-                    .textFieldStyle(.roundedBorder)
+            FeedFiltersSection(
+                searchText: $searchText,
+                showFavoritesOnly: $showFavoritesOnly,
+                onShuffleProgress: shuffleProgress
+            )
 
-                Toggle("Favorites only", isOn: $showFavoritesOnly)
-
-                Button("Shuffle progress") {
-                    items = items.map { item in
-                        var updated = item
-                        updated.progress = Double.random(in: 0...1)
-                        return updated
-                    }
-                }
-                .buttonStyle(.bordered)
-            }
-
-            Section("Feed") {
-                ForEach(filteredItems) { item in
-                    FeedRow(
-                        item: item,
-                        onToggleFavorite: { toggleFavorite(for: item.id) },
-                        onAdvance: { advanceProgress(for: item.id) }
-                    )
-                }
-            }
+            FeedItemsSection(
+                items: filteredItems,
+                onToggleFavorite: toggleFavorite,
+                onAdvance: advanceProgress
+            )
         }
         .navigationTitle("Feed Test")
         .trackRecomposition("FeedRecompositionTestView")
+    }
+
+    private func shuffleProgress() {
+        items = items.map { item in
+            var updated = item
+            updated.progress = Double.random(in: 0...1)
+            return updated
+        }
     }
 
     private func toggleFavorite(for id: UUID) {
@@ -78,6 +72,47 @@ struct FeedRecompositionTestView: View {
             updated.progress = min(updated.progress + 0.1, 1)
             return updated
         }
+    }
+}
+
+private struct FeedFiltersSection: View {
+    @Binding var searchText: String
+    @Binding var showFavoritesOnly: Bool
+    let onShuffleProgress: () -> Void
+
+    var body: some View {
+        Section("Фильтры") {
+            TextField("Search", text: $searchText)
+                .textFieldStyle(.roundedBorder)
+                .trackRecomposition("Feed.Filters.SearchField")
+
+            Toggle("Favorites only", isOn: $showFavoritesOnly)
+                .trackRecomposition("Feed.Filters.FavoritesToggle")
+
+            Button("Shuffle progress", action: onShuffleProgress)
+                .buttonStyle(.bordered)
+                .trackRecomposition("Feed.Filters.ShuffleButton")
+        }
+        .trackRecomposition("Feed.Filters")
+    }
+}
+
+private struct FeedItemsSection: View {
+    let items: [FeedRecompositionTestView.FeedItem]
+    let onToggleFavorite: (UUID) -> Void
+    let onAdvance: (UUID) -> Void
+
+    var body: some View {
+        Section("Feed") {
+            ForEach(items) { item in
+                FeedRow(
+                    item: item,
+                    onToggleFavorite: { onToggleFavorite(item.id) },
+                    onAdvance: { onAdvance(item.id) }
+                )
+            }
+        }
+        .trackRecomposition("Feed.List")
     }
 }
 
@@ -103,22 +138,27 @@ private struct FeedRow: View {
                     Image(systemName: item.isFavorite ? "star.fill" : "star")
                 }
                 .buttonStyle(.plain)
+                .trackRecomposition("Feed.Row.\(item.title).FavoriteButton")
             }
 
             ProgressView(value: item.progress)
+                .trackRecomposition("Feed.Row.\(item.title).Progress")
 
             HStack {
                 Text("\(Int(item.progress * 100))%")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
+                    .trackRecomposition("Feed.Row.\(item.title).ProgressText")
 
                 Spacer()
 
                 Button("Advance", action: onAdvance)
                     .buttonStyle(.borderedProminent)
+                    .trackRecomposition("Feed.Row.\(item.title).AdvanceButton")
             }
         }
         .padding(.vertical, 6)
+        .trackRecomposition("Feed.Row.\(item.title)")
     }
 }
 

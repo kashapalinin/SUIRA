@@ -29,6 +29,8 @@ final class SUIRATests: XCTestCase {
         XCTAssertEqual(store.countsByLabel["A"], 2)
         XCTAssertEqual(store.countsByLabel["B"], 1)
         XCTAssertEqual(store.totalCount, 3)
+        XCTAssertEqual(store.bodyEvaluationCount, 3)
+        XCTAssertEqual(store.updateBatchCount, 1)
         XCTAssertEqual(store.events.count, 3)
 
         store.reset()
@@ -43,6 +45,25 @@ final class SUIRATests: XCTestCase {
         store.record(viewLabel: "X")
         XCTAssertTrue(store.events.isEmpty)
         XCTAssertTrue(store.countsByLabel.isEmpty)
+    }
+
+    @MainActor
+    func testRecompositionStoreBuildsLabelHierarchy() throws {
+        let store = RecompositionStore()
+        store.record(viewLabel: "StateTestView")
+        store.record(viewLabel: "StateTestView.TextInput")
+        store.record(viewLabel: "StateTestView.TextInput.Field")
+        store.record(viewLabel: "StateTestView.Settings")
+
+        let root = try XCTUnwrap(store.viewHierarchy.first)
+        XCTAssertEqual(root.title, "StateTestView")
+        XCTAssertEqual(root.selfCount, 1)
+        XCTAssertEqual(root.subtreeCount, 4)
+
+        let textInput = try XCTUnwrap(root.children.first { $0.title == "TextInput" })
+        XCTAssertEqual(textInput.selfCount, 1)
+        XCTAssertEqual(textInput.subtreeCount, 2)
+        XCTAssertEqual(textInput.children.first?.title, "Field")
     }
 
     func testPerformanceExample() throws {

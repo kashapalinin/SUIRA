@@ -31,6 +31,33 @@ public final class RecompositionStore: ObservableObject {
         public var id: String { label }
     }
 
+    public struct ViewHierarchyNode: Identifiable, Sendable {
+        public let id: String
+        public let label: String
+        public let title: String
+        public let depth: Int
+        public let selfCount: Int
+        public let subtreeCount: Int
+        public let averageBodyDuration: TimeInterval?
+        public let p95BodyDuration: TimeInterval?
+        public let maxBodyDuration: TimeInterval?
+        public let children: [ViewHierarchyNode]
+
+        public var hasOwnEvents: Bool { selfCount > 0 }
+    }
+
+    public struct UpdateBatch: Identifiable, Sendable {
+        public let id: String
+        public let startedAt: Date
+        public let endedAt: Date
+        public let eventCount: Int
+        public let labels: [String]
+
+        public var duration: TimeInterval {
+            endedAt.timeIntervalSince(startedAt)
+        }
+    }
+
     public struct ElementStats: Identifiable, Sendable {
         public let key: String
         public let screenLabel: String
@@ -57,12 +84,17 @@ public final class RecompositionStore: ObservableObject {
     /// Total number of recompositions per label since last `reset()`.
     @Published public private(set) var countsByLabel: [String: Int] = [:]
     @Published public private(set) var elementCounts: [String: Int] = [:]
+    @Published public private(set) var updateBatchCount: Int = 0
 
     private var previousScreenSnapshots: [String: SuiraValueSnapshot] = [:]
     private var previousDependencySnapshots: [String: SuiraValueSnapshot] = [:]
     private var previousViewNodeSignatures: [String: [String: String]] = [:]
     private var elementDescriptors: [String: ElementStats] = [:]
+    private var firstSeenLabelOrder: [String: Int] = [:]
+    private var nextLabelOrder = 0
+    private var lastBatchEventTimestamp: Date?
     private var resetGeneration: UInt64 = 0
+    private static let updateBatchGap: TimeInterval = 0.08
 
     /// Upper bound for `events` to cap memory use.
     public var maxEvents: Int = 500 {
@@ -76,10 +108,14 @@ public final class RecompositionStore: ObservableObject {
         events.removeAll(keepingCapacity: false)
         countsByLabel.removeAll(keepingCapacity: false)
         elementCounts.removeAll(keepingCapacity: false)
+        updateBatchCount = 0
         previousScreenSnapshots.removeAll(keepingCapacity: false)
         previousDependencySnapshots.removeAll(keepingCapacity: false)
         previousViewNodeSignatures.removeAll(keepingCapacity: false)
         elementDescriptors.removeAll(keepingCapacity: false)
+        firstSeenLabelOrder.removeAll(keepingCapacity: false)
+        nextLabelOrder = 0
+        lastBatchEventTimestamp = nil
         SuiraDataFlowLog.shared.reset()
     }
 
@@ -108,6 +144,10 @@ public final class RecompositionStore: ObservableObject {
         }
 
         let event = RecompositionEvent(viewLabel: viewLabel, bodyDuration: bodyDuration)
+        if firstSeenLabelOrder[viewLabel] == nil {
+            firstSeenLabelOrder[viewLabel] = nextLabelOrder
+            nextLabelOrder += 1
+        }
 
         if !viewNodeSnapshots.isEmpty {
             recordElementChanges(
@@ -115,6 +155,14 @@ public final class RecompositionStore: ObservableObject {
                 nodeSnapshots: viewNodeSnapshots,
                 timestamp: event.timestamp
             )
+        }
+
+        if let lastBatchEventTimestamp,
+           event.timestamp.timeIntervalSince(lastBatchEventTimestamp) <= Self.updateBatchGap {
+            self.lastBatchEventTimestamp = event.timestamp
+        } else {
+            updateBatchCount += 1
+            lastBatchEventTimestamp = event.timestamp
         }
 
         events.append(event)
@@ -128,6 +176,15 @@ public final class RecompositionStore: ObservableObject {
     /// Total recompositions across all labels.
     public var totalCount: Int {
         countsByLabel.values.reduce(0, +)
+    }
+
+    /// Number of tracked `body` evaluations. This is intentionally more granular than user actions.
+    public var bodyEvaluationCount: Int {
+        totalCount
+    }
+
+    public var updateBatches: [UpdateBatch] {
+        Self.makeUpdateBatches(from: events)
     }
 
     public var currentGeneration: UInt64 {
@@ -193,7 +250,12 @@ public final class RecompositionStore: ObservableObject {
                 let lhs = $0.p95BodyDuration ?? 0
                 let rhs = $1.p95BodyDuration ?? 0
                 if lhs == rhs {
-                    return $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending
+                    let lhsOrder = firstSeenLabelOrder[$0.label] ?? Int.max
+                    let rhsOrder = firstSeenLabelOrder[$1.label] ?? Int.max
+                    if lhsOrder == rhsOrder {
+                        return $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending
+                    }
+                    return lhsOrder < rhsOrder
                 }
                 return lhs > rhs
             }
@@ -201,9 +263,122 @@ public final class RecompositionStore: ObservableObject {
         }
     }
 
+    public var viewHierarchy: [ViewHierarchyNode] {
+        let stats = labelStats
+        guard !stats.isEmpty else { return [] }
+
+        let statsByLabel = Dictionary(uniqueKeysWithValues: stats.map { ($0.label, $0) })
+        let orderedLabels = stats.map(\.label).sorted { lhs, rhs in
+            let lhsOrder = firstSeenLabelOrder[lhs] ?? Int.max
+            let rhsOrder = firstSeenLabelOrder[rhs] ?? Int.max
+            if lhsOrder == rhsOrder {
+                return lhs.localizedCaseInsensitiveCompare(rhs) == .orderedAscending
+            }
+            return lhsOrder < rhsOrder
+        }
+
+        let root = RecompositionHierarchyBuilderNode(title: "root", label: "", depth: -1)
+        for label in orderedLabels {
+            let segments = Self.splitHierarchyLabel(label)
+            guard !segments.isEmpty else { continue }
+
+            var current = root
+            var prefix = ""
+            for (index, segment) in segments.enumerated() {
+                prefix = prefix.isEmpty ? segment : "\(prefix).\(segment)"
+                current = current.child(title: segment, label: prefix, depth: index)
+            }
+        }
+
+        return root.orderedChildren.compactMap { child in
+            Self.finalizeHierarchyNode(child, statsByLabel: statsByLabel)
+        }
+    }
+
     private func trimEventsIfNeeded() {
         guard maxEvents > 0, events.count > maxEvents else { return }
         events.removeFirst(events.count - maxEvents)
+    }
+
+    private static func splitHierarchyLabel(_ label: String) -> [String] {
+        label
+            .split(separator: ".", omittingEmptySubsequences: true)
+            .map { String($0).trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+    }
+
+    private static func finalizeHierarchyNode(
+        _ node: RecompositionHierarchyBuilderNode,
+        statsByLabel: [String: LabelStats]
+    ) -> ViewHierarchyNode? {
+        let children = node.orderedChildren.compactMap { child in
+            finalizeHierarchyNode(child, statsByLabel: statsByLabel)
+        }
+        let ownStats = statsByLabel[node.label]
+        let selfCount = ownStats?.count ?? 0
+        let subtreeCount = selfCount + children.reduce(0) { $0 + $1.subtreeCount }
+
+        guard selfCount > 0 || subtreeCount > 0 else { return nil }
+
+        return ViewHierarchyNode(
+            id: node.label,
+            label: node.label,
+            title: node.title,
+            depth: node.depth,
+            selfCount: selfCount,
+            subtreeCount: subtreeCount,
+            averageBodyDuration: ownStats?.averageBodyDuration,
+            p95BodyDuration: ownStats?.p95BodyDuration,
+            maxBodyDuration: ownStats?.maxBodyDuration,
+            children: children
+        )
+    }
+
+    private static func makeUpdateBatches(from events: [RecompositionEvent]) -> [UpdateBatch] {
+        guard let first = events.first else { return [] }
+
+        var batches: [UpdateBatch] = []
+        var startedAt = first.timestamp
+        var endedAt = first.timestamp
+        var eventCount = 0
+        var labels: [String] = []
+        var seenLabels = Set<String>()
+
+        func appendLabel(_ label: String) {
+            guard !seenLabels.contains(label) else { return }
+            seenLabels.insert(label)
+            labels.append(label)
+        }
+
+        func flushBatch() {
+            guard eventCount > 0 else { return }
+            batches.append(
+                UpdateBatch(
+                    id: "\(startedAt.timeIntervalSince1970)-\(eventCount)",
+                    startedAt: startedAt,
+                    endedAt: endedAt,
+                    eventCount: eventCount,
+                    labels: labels
+                )
+            )
+        }
+
+        for event in events {
+            if event.timestamp.timeIntervalSince(endedAt) > updateBatchGap {
+                flushBatch()
+                startedAt = event.timestamp
+                eventCount = 0
+                labels.removeAll(keepingCapacity: true)
+                seenLabels.removeAll(keepingCapacity: true)
+            }
+
+            endedAt = event.timestamp
+            eventCount += 1
+            appendLabel(event.viewLabel)
+        }
+
+        flushBatch()
+        return batches
     }
 
     private func recordElementChanges(
@@ -263,5 +438,35 @@ public final class RecompositionStore: ObservableObject {
             return 2
         }
         return 1
+    }
+}
+
+private final class RecompositionHierarchyBuilderNode {
+    let title: String
+    let label: String
+    let depth: Int
+
+    private var childrenByTitle: [String: RecompositionHierarchyBuilderNode] = [:]
+    private var childOrder: [String] = []
+
+    init(title: String, label: String, depth: Int) {
+        self.title = title
+        self.label = label
+        self.depth = depth
+    }
+
+    var orderedChildren: [RecompositionHierarchyBuilderNode] {
+        childOrder.compactMap { childrenByTitle[$0] }
+    }
+
+    func child(title: String, label: String, depth: Int) -> RecompositionHierarchyBuilderNode {
+        if let existing = childrenByTitle[title] {
+            return existing
+        }
+
+        let node = RecompositionHierarchyBuilderNode(title: title, label: label, depth: depth)
+        childrenByTitle[title] = node
+        childOrder.append(title)
+        return node
     }
 }

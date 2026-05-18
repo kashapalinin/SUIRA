@@ -34,21 +34,34 @@ private struct SuiraInspectorOverlayBody<Content: View>: View {
 
         ZStack(alignment: .top) {
             rootContent
+                .safeAreaInset(edge: .top) {
+                    if !isExpanded {
+                        HStack {
+                            Spacer(minLength: 0)
+                            SuiraInspectorTopBar(store: resolvedStore) {
+                                withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) { isExpanded = true }
+                            }
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.top, 6)
+                        .padding(.bottom, 4)
+                    }
+                }
 
             if isExpanded {
                 SuiraInspectorFullScreen(
                     store: resolvedStore,
-                    rootViewTree: SuiraSwiftUIViewTreeBuilder.buildRoot(label: "RootView", view: rootContent),
                     onClose: { withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) { isExpanded = false } }
                 )
                 .transition(.move(edge: .top).combined(with: .opacity))
                 .zIndex(2)
-            } else {
-                SuiraInspectorTopBar(store: resolvedStore) {
-                    withAnimation(.spring(response: 0.35, dampingFraction: 0.86)) { isExpanded = true }
-                }
-                .zIndex(1)
             }
+        }
+        .onAppear {
+            SuiraPerformanceMonitor.shared.retain()
+        }
+        .onDisappear {
+            SuiraPerformanceMonitor.shared.release()
         }
     }
 }
@@ -67,12 +80,14 @@ private struct SuiraInspectorTopBar: View {
                         .font(.body.weight(.semibold))
                     Text("SUIRA")
                         .font(.subheadline.weight(.semibold))
-                    Text("\(store.totalCount)")
+                    Text("\(store.updateBatchCount)")
                         .font(.caption.monospacedDigit().weight(.medium))
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
                         .background(.quaternary, in: Capsule())
-                    Spacer(minLength: 0)
+                    Text("\(store.bodyEvaluationCount) body")
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
                     Image(systemName: "chevron.up")
                         .font(.caption.weight(.semibold))
                 }
@@ -86,9 +101,6 @@ private struct SuiraInspectorTopBar: View {
                 )
             }
             .buttonStyle(.plain)
-            .padding(.horizontal, 12)
-            .padding(.top, 8)
-            .frame(maxWidth: .infinity)
         }
     }
 }
@@ -103,7 +115,6 @@ private enum SuiraInspectorMainTab: Hashable {
 
 private struct SuiraInspectorFullScreen: View {
     let store: RecompositionStore
-    let rootViewTree: SuiraMirrorTreeNode
     let onClose: () -> Void
 
     @State private var mainTab: SuiraInspectorMainTab = .recompositions
@@ -122,6 +133,7 @@ private struct SuiraInspectorFullScreen: View {
                     Spacer()
                     Button("Сброс", role: .destructive) {
                         store.reset()
+                        SuiraPerformanceMonitor.shared.reset()
                         SuiraDependencyRegistry.shared.removeAll()
                         refreshNonce &+= 1
                     }
@@ -145,14 +157,14 @@ private struct SuiraInspectorFullScreen: View {
                 }
                 .pickerStyle(.segmented)
                 .padding(.horizontal, 16)
-                .padding(.bottom, 8)
+                .padding(.bottom, 10)
                 .background(.ultraThinMaterial)
 
                 Group {
                     switch mainTab {
                     case .recompositions:
                         TimelineView(.periodic(from: .now, by: 0.25)) { _ in
-                            SuiraInspectorScrollContent(store: store, rootViewTree: rootViewTree)
+                            SuiraInspectorScrollContent(store: store)
                         }
                     case .dataFlow:
                         TimelineView(.periodic(from: .now, by: 0.3)) { _ in
@@ -171,8 +183,8 @@ private struct SuiraInspectorFullScreen: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
             .background(SuiraSystemColors.groupedBackground)
             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-            .padding(.top, 6)
-            .padding(.horizontal, 4)
+            .padding(.top, 16)
+            .padding(.horizontal, 8)
             .shadow(color: .black.opacity(0.2), radius: 20, y: 8)
             .ignoresSafeArea(edges: .bottom)
         }
@@ -213,7 +225,7 @@ private struct SuiraDataFlowTabContent: View {
     }
 
     private var sourceFindings: [SourceFinding] {
-        let total = max(store.totalCount, 1)
+        let total = max(store.bodyEvaluationCount, 1)
         return sourceStats.prefix(8).compactMap { stat in
             let share = Double(stat.totalCount) / Double(total)
 
@@ -455,15 +467,89 @@ private enum SuiraTimelineEntry {
 // MARK: - Dependencies tab (Mirror)
 
 private struct SuiraDependencyTabContent: View {
+    private struct StateOptimizationFinding: Identifiable {
+        let title: String
+        let detail: String
+        let severity: String
+        let color: Color
+
+        var id: String { "\(severity):\(title)" }
+    }
+
     private var roots: [(label: String, tree: SuiraMirrorTreeNode)] {
         SuiraDependencyRegistry.shared.resolvedRoots().map { label, value in
             (label, SuiraMirrorTreeBuilder.buildRoot(label: label, value: value))
         }
     }
 
+    private var stateOptimizationFindings: [StateOptimizationFinding] {
+        var items: [StateOptimizationFinding] = []
+        let sourceStats = SuiraDataFlowLog.shared.sourceStats()
+
+        for root in roots {
+            let directChildren = root.tree.children.count
+            let totalNodes = suiraCountNodes(root.tree)
+            let collectionNodes = suiraCountNodes(root.tree) { node in
+                node.typeName.contains("Array")
+                    || node.typeName.contains("Dictionary")
+                    || node.valueSummary.contains("элементов")
+                    || node.valueSummary.contains("пар")
+            }
+
+            let matchingSources = sourceStats.filter { $0.source == root.label || $0.source.hasPrefix("\(root.label).") }
+            let totalFanOut = matchingSources.reduce(0) { $0 + $1.affectedViews }
+            let wideSources = matchingSources.filter { $0.affectedViews >= 3 }
+
+            if directChildren >= 8 || totalNodes >= 28 {
+                items.append(
+                    StateOptimizationFinding(
+                        title: root.label,
+                        detail: "Корень состояния выглядит широким: \(directChildren) прямых полей, около \(totalNodes) узлов в дереве. Стоит дробить модель на более узкие куски.",
+                        severity: totalNodes >= 40 ? "P1" : "P2",
+                        color: totalNodes >= 40 ? .red : .orange
+                    )
+                )
+            }
+
+            if collectionNodes >= 3 {
+                items.append(
+                    StateOptimizationFinding(
+                        title: root.label,
+                        detail: "Внутри состояния много коллекций или крупных веток (\(collectionNodes)). Это частый признак того, что UI читает слишком большой кусок модели.",
+                        severity: "P2",
+                        color: .orange
+                    )
+                )
+            }
+
+            if totalFanOut >= 8, !wideSources.isEmpty {
+                items.append(
+                    StateOptimizationFinding(
+                        title: root.label,
+                        detail: "Источники из этого корня широко расходятся по view: \(wideSources.count) полей затрагивают сразу несколько экранных узлов.",
+                        severity: "P1",
+                        color: .red
+                    )
+                )
+            } else if !matchingSources.isEmpty, matchingSources.count >= 4 {
+                items.append(
+                    StateOptimizationFinding(
+                        title: root.label,
+                        detail: "У корня много активных полей в графе зависимостей: \(matchingSources.count). Возможно, экрану передаётся слишком крупная модель целиком.",
+                        severity: "P3",
+                        color: .yellow
+                    )
+                )
+            }
+        }
+
+        return Array(stateOptimizationFindingsDeduped(items).prefix(8))
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
+                stateOptimizationProfileSection
 
                 Text("Подключение: `.suiraDependencyProbe(\"Имя\", value: model)` на экране.")
                     .font(.caption2)
@@ -493,6 +579,46 @@ private struct SuiraDependencyTabContent: View {
             }
             .padding(16)
             .padding(.bottom, 28)
+        }
+    }
+
+    private var stateOptimizationProfileSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Профиль: Оптимизация Состояний")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            if stateOptimizationFindings.isEmpty {
+                Text("Пока нет выраженных сигналов, что состояние слишком широкое или плохо локализовано.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .padding(12)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(SuiraSystemColors.secondaryGroupedBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(stateOptimizationFindings) { finding in
+                        HStack(alignment: .top, spacing: 10) {
+                            Text(finding.severity)
+                                .font(.caption.monospacedDigit().weight(.bold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 4)
+                                .background(finding.color, in: Capsule())
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(finding.title)
+                                    .font(.footnote.weight(.semibold))
+                                Text(finding.detail)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer(minLength: 0)
+                        }
+                    }
+                }
+                .padding(12)
+                .background(SuiraSystemColors.secondaryGroupedBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
         }
     }
 }
@@ -574,13 +700,107 @@ private struct SuiraMirrorTreeOutline: View {
     }
 }
 
+private struct SuiraTrackedViewHierarchyForest: View {
+    let nodes: [RecompositionStore.ViewHierarchyNode]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            ForEach(Array(nodes.enumerated()), id: \.element.id) { index, node in
+                SuiraTrackedViewHierarchyOutline(
+                    node: node,
+                    isLastSibling: index == nodes.count - 1
+                )
+            }
+        }
+    }
+}
+
+private struct SuiraTrackedViewHierarchyOutline: View {
+    let node: RecompositionStore.ViewHierarchyNode
+    var gutterPrefix: String = ""
+    var isLastSibling: Bool = true
+    var isRoot: Bool = true
+
+    private var childGutter: String {
+        SuiraTreeGutter.childContinuation(
+            parentGutter: gutterPrefix,
+            parentIsLastSibling: isLastSibling,
+            parentIsRoot: isRoot
+        )
+    }
+
+    private var counterText: String {
+        if node.children.isEmpty {
+            return "×\(node.selfCount)"
+        }
+        if node.selfCount == 0 {
+            return "Σ×\(node.subtreeCount)"
+        }
+        return "×\(node.selfCount)  Σ×\(node.subtreeCount)"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            SuiraMonospaceTreeRow(
+                gutterPrefix: gutterPrefix,
+                isLastSibling: isLastSibling,
+                isRoot: isRoot,
+                trailing: counterText
+            ) {
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(suiraHierarchyHeatColor(node.subtreeCount))
+                        .frame(width: 7, height: 7)
+                    Text(node.title)
+                        .font(isRoot ? .subheadline.weight(.semibold) : .footnote.weight(.medium))
+                        .lineLimit(1)
+                    suiraTagBadge(SuiraDebugTag.make(from: node.label))
+                    if let p95 = node.p95BodyDuration, p95 > 0 {
+                        Text("p95 \(suiraDurationText(p95))")
+                            .font(.caption2.monospacedDigit())
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            }
+            .padding(.vertical, 2)
+
+            ForEach(Array(node.children.enumerated()), id: \.element.id) { index, child in
+                SuiraTrackedViewHierarchyOutline(
+                    node: child,
+                    gutterPrefix: childGutter,
+                    isLastSibling: index == node.children.count - 1,
+                    isRoot: false
+                )
+            }
+        }
+    }
+}
+
 // MARK: - Content
 
 private struct SuiraInspectorScrollContent: View {
     let store: RecompositionStore
-    let rootViewTree: SuiraMirrorTreeNode
+    @ObservedObject private var performanceMonitor = SuiraPerformanceMonitor.shared
 
     private struct Finding: Identifiable {
+        let title: String
+        let detail: String
+        let severity: String
+        let color: Color
+
+        var id: String { "\(severity):\(title)" }
+    }
+
+    private struct RenderingFinding: Identifiable {
+        let title: String
+        let detail: String
+        let severity: String
+        let color: Color
+
+        var id: String { "\(severity):\(title)" }
+    }
+
+    private struct SystemFinding: Identifiable {
         let title: String
         let detail: String
         let severity: String
@@ -597,17 +817,37 @@ private struct SuiraInspectorScrollContent: View {
         store.elementStats
     }
 
+    private var viewHierarchy: [RecompositionStore.ViewHierarchyNode] {
+        store.viewHierarchy
+    }
+
+    private var performanceSnapshot: SuiraPerformanceMonitor.Snapshot {
+        performanceMonitor.snapshot
+    }
+
+    private var criticalFindingsCount: Int {
+        findings.filter { $0.severity == "P1" }.count +
+        renderingFindings.filter { $0.severity == "P1" }.count +
+        systemFindings.filter { $0.severity == "P1" }.count
+    }
+
+    private var statusColor: Color {
+        if criticalFindingsCount > 0 { return .red }
+        if !findings.isEmpty || !renderingFindings.isEmpty || !systemFindings.isEmpty { return .orange }
+        return .green
+    }
+
     private func topCauses(for label: String) -> [SuiraDataFlowLog.ViewCause] {
         SuiraDataFlowLog.shared.topSources(for: label, limit: 3)
     }
 
     private var findings: [Finding] {
-        guard store.totalCount > 0 else { return [] }
+        guard store.bodyEvaluationCount > 0 else { return [] }
 
         var items: [Finding] = []
 
         for stat in stats.prefix(8) {
-            let share = Double(stat.count) / Double(max(store.totalCount, 1))
+            let share = Double(stat.count) / Double(max(store.bodyEvaluationCount, 1))
 
             if share >= 0.45, stat.count >= 6 {
                 items.append(
@@ -653,12 +893,140 @@ private struct SuiraInspectorScrollContent: View {
         return Array(items.prefix(8))
     }
 
+    private var renderingStats: [RecompositionStore.LabelStats] {
+        stats
+            .filter { ($0.p95BodyDuration ?? 0) > 0 || ($0.maxBodyDuration ?? 0) > 0 }
+            .sorted {
+                let lhs = $0.p95BodyDuration ?? $0.maxBodyDuration ?? 0
+                let rhs = $1.p95BodyDuration ?? $1.maxBodyDuration ?? 0
+                if lhs == rhs {
+                    return $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending
+                }
+                return lhs > rhs
+            }
+    }
+
+    private var renderingFindings: [RenderingFinding] {
+        var items: [RenderingFinding] = []
+
+        for stat in renderingStats.prefix(8) {
+            if let p95 = stat.p95BodyDuration, p95 >= 0.016 {
+                items.append(
+                    RenderingFinding(
+                        title: stat.label,
+                        detail: "95-й перцентиль времени body = \(suiraDurationText(p95)). Это уже выбивается за бюджет кадра для 60 FPS.",
+                        severity: "P1",
+                        color: .red
+                    )
+                )
+            } else if let p95 = stat.p95BodyDuration, p95 >= 0.008 {
+                items.append(
+                    RenderingFinding(
+                        title: stat.label,
+                        detail: "95-й перцентиль времени body = \(suiraDurationText(p95)). Узел выглядит тяжёлым и может просаживать плавность в сложных сценариях.",
+                        severity: "P2",
+                        color: .orange
+                    )
+                )
+            }
+
+            if let max = stat.maxBodyDuration, max >= 0.012 {
+                items.append(
+                    RenderingFinding(
+                        title: stat.label,
+                        detail: "Есть пиковые всплески до \(suiraDurationText(max)). Возможны редкие, но заметные лаги.",
+                        severity: "P2",
+                        color: .orange
+                    )
+                )
+            } else if let max = stat.maxBodyDuration, max >= 0.004 {
+                items.append(
+                    RenderingFinding(
+                        title: stat.label,
+                        detail: "Фиксируются всплески времени body до \(suiraDurationText(max)).",
+                        severity: "P3",
+                        color: .yellow
+                    )
+                )
+            }
+        }
+
+        return Array(renderingFindingsDeduped(items).prefix(8))
+    }
+
+    private var systemFindings: [SystemFinding] {
+        let snapshot = performanceSnapshot
+        var items: [SystemFinding] = []
+
+        if snapshot.averageFPS < 50 {
+            items.append(
+                SystemFinding(
+                    title: "FPS",
+                    detail: "Средний FPS = \(suiraFPS(snapshot.averageFPS)). Интерфейс уже заметно теряет плавность.",
+                    severity: "P1",
+                    color: .red
+                )
+            )
+        } else if snapshot.averageFPS < 58 {
+            items.append(
+                SystemFinding(
+                    title: "FPS",
+                    detail: "Средний FPS = \(suiraFPS(snapshot.averageFPS)). Есть деградация относительно целевых 60 FPS.",
+                    severity: "P2",
+                    color: .orange
+                )
+            )
+        }
+
+        if snapshot.droppedFrames >= 10 {
+            items.append(
+                SystemFinding(
+                    title: "Пропущенные кадры",
+                    detail: "За текущий буфер зафиксировано \(snapshot.droppedFrames) пропущенных кадров.",
+                    severity: "P1",
+                    color: .red
+                )
+            )
+        } else if snapshot.droppedFrames >= 3 {
+            items.append(
+                SystemFinding(
+                    title: "Пропущенные кадры",
+                    detail: "Появляются пропуски кадров: \(snapshot.droppedFrames).",
+                    severity: "P2",
+                    color: .orange
+                )
+            )
+        }
+
+        if snapshot.memoryUsageMB >= 1024 {
+            items.append(
+                SystemFinding(
+                    title: "RAM usage",
+                    detail: "Процесс использует около \(suiraMemory(snapshot.memoryUsageMB)) памяти.",
+                    severity: "P1",
+                    color: .red
+                )
+            )
+        } else if snapshot.memoryUsageMB >= 600 {
+            items.append(
+                SystemFinding(
+                    title: "RAM usage",
+                    detail: "Память процесса выросла до \(suiraMemory(snapshot.memoryUsageMB)).",
+                    severity: "P2",
+                    color: .orange
+                )
+            )
+        }
+
+        return Array(renderingFindingsDeduped(items).prefix(6))
+    }
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 summarySection
                 recompositionProfileSection
-                hierarchySection
+                renderingProfileSection
                 eventsSection
             }
             .padding(16)
@@ -668,14 +1036,13 @@ private struct SuiraInspectorScrollContent: View {
 
     private var summarySection: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Сводка")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
             LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
-                summaryTile(title: "Всего", value: "\(store.totalCount)")
-                summaryTile(title: "Меток", value: "\(store.countsByLabel.count)")
-                summaryTile(title: "Событий в буфере", value: "\(store.events.count)")
-                summaryTile(title: "Запись", value: store.isEnabled ? "Вкл" : "Выкл")
+                summaryTile(title: "Обновления", value: "\(store.updateBatchCount)")
+                summaryTile(title: "Body-вызовы", value: "\(store.bodyEvaluationCount)")
+                summaryTile(title: "Проблемы", value: "\(findings.count + renderingFindings.count + systemFindings.count)")
+                summaryTile(title: "Средний FPS", value: suiraFPS(performanceSnapshot.averageFPS))
+                summaryTile(title: "RAM", value: suiraMemory(performanceSnapshot.memoryUsageMB))
+                summaryTile(title: "Оценка", value: "\(performanceSnapshot.performanceScore)%")
             }
             Toggle("Собирать события", isOn: Binding(
                 get: { store.isEnabled },
@@ -701,29 +1068,14 @@ private struct SuiraInspectorScrollContent: View {
         .background(SuiraSystemColors.tertiaryGroupedBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
     }
 
-    private var hierarchySection: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("Иерархия View (Mirror)")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
-            Text("Строится автоматически из корневого `View`, без дополнительной разметки в приложении.")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-
-            SuiraMirrorTreeOutline(node: rootViewTree)
-                .padding(12)
-                .background(SuiraSystemColors.secondaryGroupedBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-        }
-    }
-
     private var recompositionProfileSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Профиль: Избыточные Рекомпозиции")
+            Text("Что перерисовывается слишком часто")
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(.secondary)
 
             if findings.isEmpty {
-                Text("Пока нет выраженных аномалий в текущем буфере событий.")
+                Text("Явных лишних рекомпозиций пока не видно.")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
                     .padding(12)
@@ -731,7 +1083,7 @@ private struct SuiraInspectorScrollContent: View {
                     .background(SuiraSystemColors.secondaryGroupedBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             } else {
                 VStack(alignment: .leading, spacing: 8) {
-                    ForEach(findings) { finding in
+                    ForEach(findings.prefix(3)) { finding in
                         HStack(alignment: .top, spacing: 10) {
                             Text(finding.severity)
                                 .font(.caption.monospacedDigit().weight(.bold))
@@ -756,110 +1108,191 @@ private struct SuiraInspectorScrollContent: View {
 
             if !stats.isEmpty {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(elementStats.isEmpty ? "Метрики по меткам" : "Изменившиеся элементы")
+                    Text("Дерево рекомпозиций")
                         .font(.caption.weight(.semibold))
                         .foregroundStyle(.secondary)
 
-                    if elementStats.isEmpty {
-                        ForEach(stats.prefix(8)) { stat in
-                            VStack(alignment: .leading, spacing: 6) {
-                                HStack(alignment: .firstTextBaseline) {
+                    if viewHierarchy.isEmpty {
+                        Text("Пока нет размеченных дочерних view.")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                            .padding(10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(SuiraSystemColors.tertiaryGroupedBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    } else {
+                        SuiraTrackedViewHierarchyForest(nodes: viewHierarchy)
+                            .padding(10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(SuiraSystemColors.tertiaryGroupedBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                    }
+
+                    DisclosureGroup("Топ по body-вызовам") {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(stats.prefix(8)) { stat in
+                                VStack(alignment: .leading, spacing: 6) {
+                                    HStack(alignment: .firstTextBaseline) {
+                                        HStack(spacing: 6) {
+                                            Text(stat.label)
+                                                .font(.footnote.weight(.medium))
+                                                .lineLimit(2)
+                                            suiraTagBadge(SuiraDebugTag.make(from: stat.label))
+                                        }
+                                        Spacer(minLength: 8)
+                                        Text("×\(stat.count)")
+                                            .font(.caption.monospacedDigit())
+                                            .foregroundStyle(.secondary)
+                                    }
+
+                                    HStack(spacing: 10) {
+                                        profileMetricPill(title: "p95", value: suiraDurationText(stat.p95BodyDuration))
+                                        profileMetricPill(title: "max", value: suiraDurationText(stat.maxBodyDuration))
+                                    }
+
+                                    let causes = topCauses(for: stat.label)
+                                    if let mainCause = causes.first {
+                                        Text("Связано с: \(mainCause.source)")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                            .lineLimit(2)
+                                    }
+                                }
+                                .padding(10)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .background(SuiraSystemColors.tertiaryGroupedBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                            }
+                        }
+                    }
+                    .font(.caption.weight(.semibold))
+
+                    if !elementStats.isEmpty {
+                        DisclosureGroup("Изменившиеся элементы") {
+                            VStack(alignment: .leading, spacing: 8) {
+                                ForEach(elementStats.prefix(6)) { stat in
+                                    VStack(alignment: .leading, spacing: 6) {
+                                        HStack(alignment: .firstTextBaseline) {
+                                            HStack(spacing: 6) {
+                                                Text(stat.displayName)
+                                                    .font(.footnote.weight(.medium))
+                                                    .lineLimit(2)
+                                                suiraTagBadge(stat.tag)
+                                            }
+                                            Spacer(minLength: 8)
+                                            Text("×\(stat.count)")
+                                                .font(.caption.monospacedDigit())
+                                                .foregroundStyle(.secondary)
+                                        }
+
+                                        Text("Экран: \(stat.screenLabel)")
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .padding(10)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                    .background(SuiraSystemColors.tertiaryGroupedBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+                                }
+                            }
+                        }
+                        .font(.caption.weight(.semibold))
+                    }
+                }
+                .padding(12)
+                .background(SuiraSystemColors.secondaryGroupedBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+        }
+    }
+
+    private var renderingProfileSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Плавность интерфейса")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            if renderingFindings.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("По времени выполнения `body` сейчас нет явных тяжёлых мест.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+
+                    if !systemFindings.isEmpty {
+                        Divider()
+                        ForEach(systemFindings) { finding in
+                            systemFindingRow(finding)
+                        }
+                    }
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(SuiraSystemColors.secondaryGroupedBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(renderingFindings) { finding in
+                        HStack(alignment: .top, spacing: 10) {
+                            Text(finding.severity)
+                                .font(.caption.monospacedDigit().weight(.bold))
+                                .foregroundStyle(.white)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 4)
+                                .background(finding.color, in: Capsule())
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(finding.title)
+                                    .font(.footnote.weight(.semibold))
+                                Text(finding.detail)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer(minLength: 0)
+                        }
+                    }
+
+                    if !systemFindings.isEmpty {
+                        Divider()
+                            .padding(.vertical, 2)
+                        ForEach(systemFindings) { finding in
+                            systemFindingRow(finding)
+                        }
+                    }
+                }
+                .padding(12)
+                .background(SuiraSystemColors.secondaryGroupedBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
+
+            DisclosureGroup("Подробные метрики") {
+                LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 10) {
+                    summaryTile(title: "Текущий FPS", value: suiraFPS(performanceSnapshot.currentFPS))
+                    summaryTile(title: "Средний FPS", value: suiraFPS(performanceSnapshot.averageFPS))
+                    summaryTile(title: "RAM", value: suiraMemory(performanceSnapshot.memoryUsageMB))
+                    summaryTile(title: "Пропуски кадров", value: "\(performanceSnapshot.droppedFrames)")
+                    summaryTile(title: "Перегрузки кадра", value: "\(performanceSnapshot.frameOverruns)")
+                    summaryTile(title: "Цель", value: "\(performanceSnapshot.targetFPS) FPS")
+                }
+            }
+            .padding(12)
+            .background(SuiraSystemColors.secondaryGroupedBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+
+            if !renderingStats.isEmpty {
+                DisclosureGroup("Тяжёлые view") {
+                    VStack(alignment: .leading, spacing: 8) {
+                        ForEach(renderingStats.prefix(5)) { stat in
+                            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                                VStack(alignment: .leading, spacing: 4) {
                                     HStack(spacing: 6) {
                                         Text(stat.label)
                                             .font(.footnote.weight(.medium))
                                             .lineLimit(2)
                                         suiraTagBadge(SuiraDebugTag.make(from: stat.label))
                                     }
-                                    Spacer(minLength: 8)
-                                    Text("×\(stat.count)")
-                                        .font(.caption.monospacedDigit())
+                                    Text("Рекомпозиций: \(stat.count)")
+                                        .font(.caption2)
                                         .foregroundStyle(.secondary)
                                 }
-
-                                HStack(spacing: 10) {
-                                    profileMetricPill(title: "avg", value: suiraDurationText(stat.averageBodyDuration))
-                                    profileMetricPill(title: "p95", value: suiraDurationText(stat.p95BodyDuration))
-                                    profileMetricPill(title: "max", value: suiraDurationText(stat.maxBodyDuration))
-                                }
-
-                                let causes = topCauses(for: stat.label)
-                                if !causes.isEmpty {
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text("Основные причины")
-                                            .font(.caption2.weight(.semibold))
-                                            .foregroundStyle(.secondary)
-                                        ForEach(causes) { cause in
-                                            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                                Image(systemName: "arrow.right")
-                                                    .font(.caption2)
-                                                    .foregroundStyle(.tertiary)
-                                                Text(cause.source)
-                                                    .font(.caption)
-                                                    .lineLimit(2)
-                                                Spacer(minLength: 6)
-                                                Text("×\(cause.count)")
-                                                    .font(.caption2.monospacedDigit())
-                                                    .foregroundStyle(.secondary)
-                                            }
-                                        }
-                                    }
-                                    .padding(.top, 2)
-                                }
-                            }
-                            .padding(10)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(SuiraSystemColors.tertiaryGroupedBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        }
-                    } else {
-                        ForEach(elementStats.prefix(12)) { stat in
-                            VStack(alignment: .leading, spacing: 6) {
-                                HStack(alignment: .firstTextBaseline) {
-                                    HStack(spacing: 6) {
-                                        Text(stat.displayName)
-                                            .font(.footnote.weight(.medium))
-                                            .lineLimit(2)
-                                        suiraTagBadge(stat.tag)
-                                    }
-                                    Spacer(minLength: 8)
-                                    Text("×\(stat.count)")
+                                Spacer(minLength: 8)
+                                VStack(alignment: .trailing, spacing: 4) {
+                                    Text("p95 \(suiraDurationText(stat.p95BodyDuration))")
                                         .font(.caption.monospacedDigit())
+                                        .foregroundStyle(.primary)
+                                    Text("max \(suiraDurationText(stat.maxBodyDuration))")
+                                        .font(.caption2.monospacedDigit())
                                         .foregroundStyle(.secondary)
-                                }
-
-                                HStack(spacing: 10) {
-                                    profileMetricPill(title: "type", value: suiraCompactTypeName(stat.typeName))
-                                }
-
-                                Text("Экран: \(stat.screenLabel)")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                Text(stat.path)
-                                    .font(.caption2.monospaced())
-                                    .foregroundStyle(.tertiary)
-                                    .lineLimit(2)
-
-                                let causes = topCauses(for: stat.analysisLabel)
-                                if !causes.isEmpty {
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text("Основные причины")
-                                            .font(.caption2.weight(.semibold))
-                                            .foregroundStyle(.secondary)
-                                        ForEach(causes) { cause in
-                                            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                                Image(systemName: "arrow.right")
-                                                    .font(.caption2)
-                                                    .foregroundStyle(.tertiary)
-                                                Text(cause.source)
-                                                    .font(.caption)
-                                                    .lineLimit(2)
-                                                Spacer(minLength: 6)
-                                                Text("×\(cause.count)")
-                                                    .font(.caption2.monospacedDigit())
-                                                    .foregroundStyle(.secondary)
-                                            }
-                                        }
-                                    }
-                                    .padding(.top, 2)
                                 }
                             }
                             .padding(10)
@@ -871,6 +1304,25 @@ private struct SuiraInspectorScrollContent: View {
                 .padding(12)
                 .background(SuiraSystemColors.secondaryGroupedBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
             }
+        }
+    }
+
+    private func systemFindingRow(_ finding: SystemFinding) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Text(finding.severity)
+                .font(.caption.monospacedDigit().weight(.bold))
+                .foregroundStyle(.white)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 4)
+                .background(finding.color, in: Capsule())
+            VStack(alignment: .leading, spacing: 3) {
+                Text(finding.title)
+                    .font(.footnote.weight(.semibold))
+                Text(finding.detail)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
         }
     }
 
@@ -890,39 +1342,40 @@ private struct SuiraInspectorScrollContent: View {
 
     private var eventsSection: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Последние события")
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.secondary)
-            if store.events.isEmpty {
-                Text("Пусто")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            } else {
-                LazyVStack(alignment: .leading, spacing: 8) {
-                    ForEach(Array(store.events.suffix(40).reversed())) { event in
-                        HStack(alignment: .top) {
-                            VStack(alignment: .leading, spacing: 2) {
-                                HStack(spacing: 6) {
-                                    Text(event.viewLabel)
-                                        .font(.subheadline.weight(.medium))
-                                    suiraTagBadge(SuiraDebugTag.make(from: event.viewLabel))
+            DisclosureGroup("Последние события") {
+                if store.events.isEmpty {
+                    Text("Пусто")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                } else {
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(store.events.suffix(20).reversed())) { event in
+                            HStack(alignment: .top) {
+                                VStack(alignment: .leading, spacing: 2) {
+                                    HStack(spacing: 6) {
+                                        Text(event.viewLabel)
+                                            .font(.subheadline.weight(.medium))
+                                        suiraTagBadge(SuiraDebugTag.make(from: event.viewLabel))
+                                    }
+                                    Text(formatTime(event.timestamp))
+                                        .font(.caption2)
+                                        .foregroundStyle(.secondary)
                                 }
-                                Text(formatTime(event.timestamp))
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
+                                Spacer(minLength: 8)
+                                Text(suiraDurationText(event.bodyDuration))
+                                    .font(.caption.monospacedDigit())
+                                    .foregroundStyle(.tertiary)
                             }
-                            Spacer(minLength: 8)
-                            Text(suiraDurationText(event.bodyDuration))
-                                .font(.caption.monospacedDigit())
-                                .foregroundStyle(.tertiary)
+                            .padding(10)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .background(SuiraSystemColors.tertiaryGroupedBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                         }
-                        .padding(10)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(SuiraSystemColors.secondaryGroupedBackground, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
                     }
                 }
             }
         }
+        .padding(12)
+        .background(SuiraSystemColors.secondaryGroupedBackground, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
     }
 
     private func formatTime(_ date: Date) -> String {
@@ -941,6 +1394,57 @@ private func suiraDurationText(_ interval: TimeInterval?) -> String {
     guard let interval else { return "—" }
     if interval < 0.001 { return "<0.01 ms" }
     return String(format: "%.2f ms", interval * 1000)
+}
+
+private func suiraFPS(_ value: Double) -> String {
+    String(format: "%.0f", value)
+}
+
+private func suiraMemory(_ valueMB: Double) -> String {
+    if valueMB >= 1024 {
+        return String(format: "%.2f GB", valueMB / 1024.0)
+    }
+    return String(format: "%.0f MB", valueMB)
+}
+
+private func suiraHierarchyHeatColor(_ count: Int) -> Color {
+    if count >= 20 { return .red }
+    if count >= 10 { return .orange }
+    if count >= 4 { return .yellow }
+    if count > 0 { return .green }
+    return .secondary
+}
+
+private func suiraCountNodes(
+    _ node: SuiraMirrorTreeNode,
+    where predicate: ((SuiraMirrorTreeNode) -> Bool)? = nil
+) -> Int {
+    let ownCount = predicate?(node) ?? true ? 1 : 0
+    return ownCount + node.children.reduce(0) { partial, child in
+        partial + suiraCountNodes(child, where: predicate)
+    }
+}
+
+private func stateOptimizationFindingsDeduped<T: Identifiable>(_ items: [T]) -> [T] where T.ID: Hashable {
+    var seen: Set<T.ID> = []
+    var result: [T] = []
+    for item in items {
+        if seen.insert(item.id).inserted {
+            result.append(item)
+        }
+    }
+    return result
+}
+
+private func renderingFindingsDeduped<T: Identifiable>(_ items: [T]) -> [T] where T.ID: Hashable {
+    var seen: Set<T.ID> = []
+    var result: [T] = []
+    for item in items {
+        if seen.insert(item.id).inserted {
+            result.append(item)
+        }
+    }
+    return result
 }
 
 private func suiraCompactTypeName(_ raw: String) -> String {
@@ -968,9 +1472,6 @@ private func suiraTagBadge(_ tag: String) -> some View {
 
 public extension View {
     /// Верхний бар SUIRA и полноэкранный инспектор (статистика, дерево по меткам, лента событий).
-    ///
-    /// Базовое подключение остаётся минимальным: overlay + `trackRecomposition` на корневой экран.
-    /// Более глубокая иерархия появится только если приложение опционально размечает дочерние вью.
     ///
     /// Обновление через `TimelineView`, без `@ObservedObject`, чтобы не провоцировать лишние проходы `body` отслеживаемых экранов.
     func suiraInspectorOverlay(store: RecompositionStore? = nil) -> some View {
