@@ -1,9 +1,4 @@
-//
-//  SuiraOptimizationTracker.swift
-//  SUIRA
-//
-//  Created by Павел Калинин on 10.05.2026.
-//
+
 import Foundation
 
 /// Журнал вызовов == и изменений .id() для вкладки «Оптимизация».

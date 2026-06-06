@@ -7,198 +7,283 @@
 import SwiftUI
 import SUIRA
 
-// MARK: - Главный экран тестов
 struct RefactoringProblemsTestView: View {
-    @State private var triggerCount = 0
-    @State private var sharedState = "Initial"
-    @State private var unstableIdCounter = 0
-    @State private var heavyTrigger = false
-    @State private var equatableTimestamp = Date()
+    @State private var tick = 0
+    @State private var hotCounter = 0
+    @State private var volatileIdentity = UUID()
+    @State private var workloadSeed = 0
+    @State private var broadState = DemoBroadState.initial
+    @State private var isRunning = false
 
     var body: some View {
         List {
-            Section("🎛 Управление тестами") {
-                Button("🔥 Запустить все проблемы") {
-                    SuiraDataFlow.mutation("TestRunner", detail: "Одновременный запуск 5 антипаттернов")
-                    triggerCount += 1
-                    sharedState = "Updated \(Date().formatted(date: .omitted, time: .standard))"
-                    unstableIdCounter += 1
-                    equatableTimestamp = Date()
-                    heavyTrigger.toggle()
+            Section("Управление демонстрацией") {
+                Button(isRunning ? "Серия выполняется..." : "Запустить 10 шумных обновлений") {
+                    runProblemBurst()
                 }
                 .buttonStyle(.borderedProminent)
-                .trackRecomposition("Refactoring.TriggerButton")
-                
-                Text("Нажмите кнопку 3–5 раз, затем откройте инспектор SUIRA.")
+                .disabled(isRunning)
+                .accessibilityIdentifier("RunRecompositionProblemsDemoButton")
+
+                Text("Тиков: \(tick)")
+                    .font(.headline.monospacedDigit())
+
+                Text("После серии откройте SUIRA: вкладка рекомпозиций должна показать P1 для ProblemsDemo.Screen и ProblemsDemo.HotCounter.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
-            Section("1. Нестабильный .id()") {
-                UnstableIdDemo(changingId: unstableIdCounter)
+            Section("1. Горячий контейнер") {
+                HotCounterPanel(counter: hotCounter, volatileIdentity: volatileIdentity)
             }
 
-            Section("2. Неэффективный .equatable()") {
-                InefficientEquatableDemo(timestamp: equatableTimestamp)
+            Section("2. Широкая модель состояния") {
+                WideStatePanel(state: broadState)
             }
 
-            Section("3. Широкий охват состояния (Fan-out)") {
-                WideStateFanOutDemo(sharedText: sharedState)
+            Section("3. Тяжёлая синхронная работа") {
+                ExpensiveBodyPanel(seed: workloadSeed)
             }
 
-            Section("4. Тяжёлый body") {
-                HeavyBodyDemo(trigger: heavyTrigger)
-            }
-
-            Section("5. Избыточные обновления детей") {
-                MissingEquatableDemo(parentTrigger: triggerCount)
+            Section("4. Дочерний блок без причины") {
+                StaticButRebuiltPanel(parentTick: tick)
             }
         }
-        .navigationTitle("Проблемы рефакторинга")
-        .trackRecomposition("RefactoringProblemsTestView")
+        .navigationTitle("Recomposition Problems")
+        .suiraDependencyProbe("broadState", value: broadState)
+        .trackRecomposition("ProblemsDemo.Screen")
+    }
+
+    private func runProblemBurst() {
+        guard !isRunning else { return }
+        isRunning = true
+
+        Task { @MainActor in
+            for step in 1...10 {
+                SuiraDataFlow.mutation("tick", detail: "\(tick) -> \(step)")
+                tick = step
+
+                SuiraDataFlow.mutation("hotCounter", detail: "\(hotCounter) -> \(hotCounter + 1)")
+                hotCounter += 1
+
+                SuiraDataFlow.mutation("workloadSeed", detail: "\(workloadSeed) -> \(workloadSeed + 1)")
+                workloadSeed += 1
+
+                SuiraDataFlow.mutation("volatileIdentity", detail: "new UUID for HotCounterPanel.id")
+                volatileIdentity = UUID()
+
+                SuiraDataFlow.mutation("broadState", detail: "advance(step: \(step))")
+                broadState.advance(step: step)
+                try? await Task.sleep(nanoseconds: 80_000_000)
+            }
+            isRunning = false
+        }
     }
 }
 
-// MARK: - 1. Нестабильный .id()
-private struct UnstableIdDemo: View {
-    let changingId: Int
-    
+private struct HotCounterPanel: View {
+    let counter: Int
+    let volatileIdentity: UUID
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("ID меняется при каждом нажатии → дерево пересоздаётся")
+            Text("Контейнер получает каждое обновление и пересоздаёт identity.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            
-            Text("Текущий ID: \(changingId)")
+
+            Text("Hot counter: \(counter)")
                 .font(.headline)
-                .padding(8)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                .monospacedDigit()
+
+            HStack(spacing: 6) {
+                ForEach(0..<8, id: \.self) { index in
+                    Text("\(counter + index)")
+                        .font(.caption.monospacedDigit())
+                        .frame(width: 34, height: 28)
+                        .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+                }
+            }
         }
         .padding(.vertical, 4)
-        // Антипаттерн: .id() зависит от часто меняющегося значения
-        .id(changingId)
-        .suiraTrackId("UnstableIdDemo", id: changingId)
-        .trackRecomposition("Refactoring.UnstableId")
+        .id(volatileIdentity)
+        .suiraTrackId("ProblemsDemo.HotCounter.Identity", id: volatileIdentity)
+        .trackRecomposition("ProblemsDemo.HotCounter")
     }
 }
 
-// MARK: - 2. Неэффективный .equatable()
-private struct InefficientEquatableDemo: View, Equatable {
-    let timestamp: Date
-    
-    // Антипаттерн: == игнорирует изменяющееся поле, возвращает true,
-    // но родитель всё равно форсирует обновление layout-контекста
-    static func == (lhs: Self, rhs: Self) -> Bool {
-        let result = lhs.timestamp.timeIntervalSince1970 == rhs.timestamp.timeIntervalSince1970
-        // SUIRA зафиксирует частые вызовы == и результат
-        return result
-    }
-    
+private struct WideStatePanel: View {
+    let state: DemoBroadState
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("equatable() вызывается, но не предотвращает обновления")
+            Text("Вью получает модель целиком: \(state.rows.count) строк, \(state.metrics.count) метрик, \(state.flags.count) флагов.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Text("Timestamp: \(timestamp.formatted(date: .omitted, time: .standard))")
-                .font(.headline)
-        }
-        .padding(.vertical, 4)
-//        .suiraTrackEquatable("InefficientEquatableDemo")
-        .trackRecomposition("Refactoring.InefficientEquatable")
-    }
-}
 
-// MARK: - 3. Широкий охват состояния (Fan-out)
-private struct WideStateFanOutDemo: View {
-    let sharedText: String
-    
-    var body: some View {
-        VStack(spacing: 6) {
-            Text("Одно состояние обновляет 5 независимых view")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            
             HStack {
-                FanOutChild(text: sharedText, index: 1)
-                FanOutChild(text: sharedText, index: 2)
-                FanOutChild(text: sharedText, index: 3)
-                FanOutChild(text: sharedText, index: 4)
-                FanOutChild(text: sharedText, index: 5)
+                statusPill("Version", "\(state.version)")
+                statusPill("Unread", "\(state.unreadCount)")
+                statusPill("Mode", state.selectedMode)
+            }
+
+            ForEach(state.metrics.prefix(4)) { metric in
+                HStack {
+                    Text(metric.title)
+                    Spacer()
+                    Text("\(metric.value)")
+                        .monospacedDigit()
+                }
+                .font(.caption)
             }
         }
         .padding(.vertical, 4)
-        .trackRecomposition("Refactoring.WideStateRoot")
+    }
+
+    private func statusPill(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(title)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.caption.weight(.semibold))
+                .lineLimit(1)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(8)
+        .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
     }
 }
 
-private struct FanOutChild: View {
-    let text: String
-    let index: Int
-    
-    var body: some View {
-        Text("\(index): \(text)")
-            .font(.caption.monospacedDigit())
-            .padding(6)
-            .background(.tertiary, in: RoundedRectangle(cornerRadius: 6))
-            .trackRecomposition("Refactoring.FanOutChild.\(index)")
-    }
-}
+private struct ExpensiveBodyPanel: View {
+    let seed: Int
 
-// MARK: - 4. Тяжёлый body
-private struct HeavyBodyDemo: View {
-    let trigger: Bool
-    
     var body: some View {
-        // Антипаттерн: синхронные вычисления в body
-        let heavyResult = performHeavyCalculation(trigger: trigger)
-        
+        let heavyResult = performHeavyCalculation(seed: seed)
+
         VStack(alignment: .leading, spacing: 8) {
-            Text("Синхронный расчёт в body (~0.5–2 ms)")
+            Text("Синхронный расчёт выполняется прямо во время построения body.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            Text("Результат: \(heavyResult)")
+
+            Text("Checksum: \(heavyResult)")
                 .font(.headline)
+                .monospacedDigit()
         }
         .padding(.vertical, 4)
-        .trackRecomposition("Refactoring.HeavyBody")
     }
-    
-    private func performHeavyCalculation(trigger: Bool) -> Int {
+
+    private func performHeavyCalculation(seed: Int) -> Int {
         var sum = 0
-        // Намеренно тяжёлый цикл для генерации p95/max всплесков
-        let limit = trigger ? 800_000 : 100_000
-        for i in 0..<limit { sum += i }
+        let limit = 450_000 + (seed % 3) * 120_000
+        for value in 0..<limit {
+            sum = (sum &+ value &+ seed) % 1_000_003
+        }
         return sum
     }
 }
 
-// MARK: - 5. Избыточные обновления детей
-private struct MissingEquatableDemo: View {
-    let parentTrigger: Int
-    
+private struct StaticButRebuiltPanel: View {
+    let parentTick: Int
+
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Родитель обновляется → ребёнок перерисовывается без причины")
+            Text("Родительский tick меняется, хотя карточка ниже всегда показывает одно и то же.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
-            
-            UnoptimizedChild(staticLabel: "Я не меняюсь, но body вызывается")
+
+            Text("Parent tick: \(parentTick)")
+                .font(.caption.monospacedDigit())
+                .foregroundStyle(.secondary)
+
+            StaticPayloadCard(parentTick: parentTick)
+                .suiraTrackEquatable("ProblemsDemo.StaticPayload.Equatable")
         }
         .padding(.vertical, 4)
-        .trackRecomposition("Refactoring.MissingEquatableParent")
     }
 }
 
-private struct UnoptimizedChild: View {
-    let staticLabel: String
-    
-    var body: some View {
-        Text(staticLabel)
-            .font(.subheadline)
-            .padding(8)
-            .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
-            .trackRecomposition("Refactoring.UnoptimizedChild")
+private struct StaticPayloadCard: View, Equatable {
+    let parentTick: Int
+
+    static func == (lhs: Self, rhs: Self) -> Bool {
+        true
     }
+
+    var body: some View {
+        Text("Static payload")
+            .font(.subheadline.weight(.medium))
+            .padding(8)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+    }
+}
+
+private struct DemoBroadState: Equatable {
+    var version: Int
+    var userName: String
+    var unreadCount: Int
+    var selectedMode: String
+    var flags: [Bool]
+    var rows: [DemoRow]
+    var metrics: [DemoMetric]
+    var notifications: [String]
+    var lastSyncDescription: String
+    var debugNotes: [String]
+
+    static let initial = DemoBroadState(
+        version: 0,
+        userName: "Demo User",
+        unreadCount: 3,
+        selectedMode: "Live",
+        flags: [true, false, true, true, false, false, true, false],
+        rows: (1...14).map { DemoRow(title: "Row \($0)", subtitle: "Cached value \($0)") },
+        metrics: [
+            DemoMetric(title: "CPU", value: 18),
+            DemoMetric(title: "Memory", value: 42),
+            DemoMetric(title: "Network", value: 7),
+            DemoMetric(title: "Queue", value: 3),
+            DemoMetric(title: "Cache", value: 91)
+        ],
+        notifications: ["Welcome", "Refresh pending", "Sync complete"],
+        lastSyncDescription: "not started",
+        debugNotes: ["wide-state", "fan-out", "identity-reset", "body-work"]
+    )
+
+    mutating func advance(step: Int) {
+        version = step
+        unreadCount = 3 + step
+        selectedMode = step.isMultiple(of: 2) ? "Live" : "Replay"
+        flags = flags.enumerated().map { index, value in
+            index == step % max(flags.count, 1) ? !value : value
+        }
+        metrics = metrics.enumerated().map { index, metric in
+            DemoMetric(title: metric.title, value: metric.value + step + index)
+        }
+        rows = rows.enumerated().map { index, row in
+            DemoRow(title: row.title, subtitle: "tick \(step), item \(index + 1)")
+        }
+        notifications.append("tick \(step)")
+        if notifications.count > 8 {
+            notifications.removeFirst(notifications.count - 8)
+        }
+        lastSyncDescription = Date().formatted(date: .omitted, time: .standard)
+        debugNotes.append("mutation-\(step)")
+        if debugNotes.count > 12 {
+            debugNotes.removeFirst(debugNotes.count - 12)
+        }
+    }
+}
+
+private struct DemoRow: Identifiable, Equatable {
+    let id = UUID()
+    var title: String
+    var subtitle: String
+}
+
+private struct DemoMetric: Identifiable, Equatable {
+    let id = UUID()
+    var title: String
+    var value: Int
 }
 
 #Preview {

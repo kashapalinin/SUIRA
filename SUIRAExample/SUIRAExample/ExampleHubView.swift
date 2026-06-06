@@ -12,6 +12,10 @@ struct ExampleHubView: View {
                     NavigationLink("Feed Recomposition Test") {
                         FeedRecompositionTestView()
                     }
+
+                    NavigationLink("Recomposition Problems Demo") {
+                        RefactoringProblemsTestView()
+                    }
                 }
             }
             .navigationTitle("SUIRA Example")

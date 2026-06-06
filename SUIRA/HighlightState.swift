@@ -1,9 +1,4 @@
-//
-//  HighlightState.swift
-//  SUIRA
-//
-//  Created by Павел Калинин on 10.05.2026.
-//
+
 import SwiftUI
 
 private final class HighlightState {

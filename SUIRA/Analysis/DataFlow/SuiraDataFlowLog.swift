@@ -45,6 +45,8 @@ public final class SuiraDataFlowLog: @unchecked Sendable {
         public let source: String
         public let totalCount: Int
         public let affectedViews: Int
+        public let latestDetail: String?
+        public let lastSeenAt: Date?
 
         public var id: String { source }
     }
@@ -59,7 +61,7 @@ public final class SuiraDataFlowLog: @unchecked Sendable {
     public func recordMutation(source: String, detail: String? = nil) {
         lock.lock()
         defer { lock.unlock() }
-        mutations.append(MutationEntry(source: source, detail: detail))
+        mutations.append(MutationEntry(source: Self.normalizedExplicitSource(source), detail: detail))
         if mutations.count > maxMutations {
             mutations.removeFirst(mutations.count - maxMutations)
         }
@@ -93,11 +95,19 @@ public final class SuiraDataFlowLog: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
+        let latestMutationBySource = Dictionary(grouping: mutations, by: \.source)
+            .compactMapValues { entries in
+                entries.max { $0.timestamp < $1.timestamp }
+            }
+
         return edgeCounts.map { source, targets in
-            SourceStats(
+            let latestMutation = latestMutationBySource[source]
+            return SourceStats(
                 source: source,
                 totalCount: targets.values.reduce(0, +),
-                affectedViews: targets.count
+                affectedViews: targets.count,
+                latestDetail: latestMutation?.detail,
+                lastSeenAt: latestMutation?.timestamp
             )
         }
         .sorted {
@@ -109,6 +119,19 @@ public final class SuiraDataFlowLog: @unchecked Sendable {
             }
             return $0.totalCount > $1.totalCount
         }
+    }
+
+    private static func normalizedExplicitSource(_ source: String) -> String {
+        let normalized = source
+            .split(separator: ".")
+            .map(String.init)
+            .filter { !$0.isEmpty && !isCollectionIndex($0) }
+            .joined(separator: ".")
+        return normalized.isEmpty ? source : normalized
+    }
+
+    private static func isCollectionIndex(_ component: String) -> Bool {
+        component.hasPrefix("[") && component.hasSuffix("]")
     }
 
     public func recentMutations(limit: Int = 80) -> [MutationEntry] {
@@ -157,11 +180,65 @@ public extension SuiraDataFlowLog {
         limit: Int = 20
     ) {
         let changes = SuiraValueSnapshotBuilder.diff(previous: previous, current: current, limit: limit)
-        for change in changes {
-            let source = change.path.isEmpty ? current.label : "\(current.label).\(change.path)"
-            let detail = diffDetail(oldValue: change.oldValue, newValue: change.newValue)
-            recordMutation(source: source, detail: detail)
+        let grouped = Dictionary(grouping: changes) { change in
+            mutationSource(root: current.label, path: change.path)
         }
+
+        for source in grouped.keys.sorted() {
+            let sourceChanges = grouped[source, default: []]
+            recordMutation(source: source, detail: groupedDiffDetail(root: current.label, changes: sourceChanges))
+        }
+    }
+
+    private func mutationSource(root: String, path: String) -> String {
+        let compactPath = compactedStatePath(path)
+        guard !compactPath.isEmpty else { return root }
+        return "\(root).\(compactPath)"
+    }
+
+    private func compactedStatePath(_ path: String) -> String {
+        let meaningfulComponents = path
+            .split(separator: ".")
+            .map(String.init)
+            .filter { !$0.isEmpty && !isCollectionIndex($0) }
+
+        guard meaningfulComponents.count > 2 else {
+            return meaningfulComponents.joined(separator: ".")
+        }
+
+        guard let first = meaningfulComponents.first, let last = meaningfulComponents.last else {
+            return ""
+        }
+
+        return "\(first).\(last)"
+    }
+
+    private func isCollectionIndex(_ component: String) -> Bool {
+        component.hasPrefix("[") && component.hasSuffix("]")
+    }
+
+    private func groupedDiffDetail(
+        root: String,
+        changes: [(path: String, oldValue: String?, newValue: String?)]
+    ) -> String? {
+        guard let first = changes.first else { return nil }
+
+        if changes.count == 1 {
+            let field = compactedStatePath(first.path)
+            let prefix = field.isEmpty ? root : field
+            return "\(prefix): \(diffDetail(oldValue: first.oldValue, newValue: first.newValue))"
+        }
+
+        let fields = changes
+            .map { compactedStatePath($0.path) }
+            .filter { !$0.isEmpty }
+
+        let uniqueFields = Array(Set(fields)).sorted()
+        let preview = uniqueFields.prefix(3).joined(separator: ", ")
+        if preview.isEmpty {
+            return "\(changes.count) изменений"
+        }
+        return "\(changes.count) изменений: \(preview)"
     }
 
     private func diffDetail(oldValue: String?, newValue: String?) -> String {

@@ -1,9 +1,4 @@
-//
-//  SuiraHighlightEnabledKey.swift
-//  SUIRA
-//
-//  Created by Павел Калинин on 10.05.2026.
-//
+
 import SwiftUI
 
 private struct SuiraHighlightEnabledKey: EnvironmentKey {

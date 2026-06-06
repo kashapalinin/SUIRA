@@ -257,8 +257,8 @@ public enum SuiraMirrorTreeBuilder {
 }
 
 public enum SuiraSwiftUIViewTreeBuilder {
-    public static let maxDepth = 10
-    public static let maxChildrenPerNode = 32
+    public static let maxDepth = 50
+    public static let maxChildrenPerNode = 64
 
     public static func buildRoot(label: String, view: Any) -> SuiraMirrorTreeNode {
         var seen = Set<String>()

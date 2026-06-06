@@ -1,9 +1,4 @@
-//
-//  SuiraEquatableProxy.swift
-//  SUIRA
-//
-//  Created by Павел Калинин on 10.05.2026.
-//
+
 import SwiftUI
 
 // MARK: - Equatable Proxy
@@ -24,6 +19,7 @@ public extension View where Self: Equatable {
     /// Аналог .equatable(), но с логированием результата == в SuiraOptimizationTracker
     func suiraTrackEquatable(_ label: String) -> some View {
         SuiraEquatableProxy(label: label, content: self)
+            .equatable()
     }
 }
 
